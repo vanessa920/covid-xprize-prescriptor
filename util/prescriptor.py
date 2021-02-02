@@ -25,8 +25,9 @@ class CalcCasesLayer(Layer):
         pct_inf = tf.math.divide(curr_total_cases, pop_size)
 
         term_1 = tf.math.subtract(tf.math.multiply(ratio, tf.math.subtract(1.0, pct_inf)), 1.0)
-
+        
         term_2 = tf.math.multiply(tf.reduce_mean(prev_new_cases), WINDOW_SIZE)
+        
         return tf.math.maximum(0.0, tf.math.add(tf.math.multiply(term_1, term_2), prev_new_cases[0]))
 
 # testing a stringency constraint
@@ -150,7 +151,7 @@ def construct_model(num_days):
         prev_new_cases_layers.append(next_new_cases)
         current_total_cases_layers.append(next_total_cases)
 
-    total_new_cases = add_layer(prev_new_cases_layers[WINDOW_SIZE:])
+    total_new_cases = reshape_context_layer(add_layer(prev_new_cases_layers[WINDOW_SIZE:]))
     #total_cases = add_layer([total_new_cases, total_cases_input])
     avg_stringency = Average()(future_stringency_layers)
 

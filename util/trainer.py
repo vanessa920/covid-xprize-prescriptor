@@ -1,6 +1,3 @@
-# covid xprize prescriptor trainer
-# Andrew Zhou
-
 import numpy as np
 import tensorflow as tf
 import keras.backend as K
@@ -9,6 +6,8 @@ import keras
 
 from .prescriptor import construct_model
 
+
+# normalize the weights?
 BATCH_SIZE = 1
 NB_LOOKBACK_DAYS = 21
 NB_CONTEXT = 1
@@ -25,12 +24,13 @@ class Trainer(object):
         self.prescriptor = construct_model(num_days)
         
         self.loss_fn = tf.keras.losses.MeanAbsoluteError()
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate=0.06)
+        self.optimizer = tf.keras.optimizers.Adam()
+        
         
         self.optimizer_zero_weights = [np.int64(0.0)] + [np.zeros((12,)) for i in range(2*num_days)]
         
-        self.inputs = None
-        self.min_cases = None
+        self.inputs = [tf.zeros((1, NB_LOOKBACK_DAYS, NB_CONTEXT)), tf.zeros((1, NB_LOOKBACK_DAYS, NB_ACTION)), tf.zeros((1,)), tf.zeros((1,)), tf.zeros((1, WINDOW_SIZE)), tf.zeros((1, NB_ACTION))]
+        self.min_cases = tf.constant(0.0, dtype='float32')
         
     def get_prescriptor(self):
         return self.prescriptor
@@ -50,11 +50,9 @@ class Trainer(object):
         
     # context, action, population, current infected, prev cases, weights
     def predict(self):
-        assert(self.inputs != None)
         return(self.prescriptor(self.inputs))
     
     def predict_round(self):
-        assert(self.inputs != None)
         return self.prescriptor(tf.math.round(self.inputs))
     
     def weights(self):
@@ -63,27 +61,36 @@ class Trainer(object):
     # sets inputs, calcs min cases, then sets weights to zero
     def set_inputs_and_goal(self, inputs):
         self.inputs = inputs
-
         self.max_weights()
-        self.min_cases = tf.reshape(self.predict()[0], ())
+        self.min_cases = tf.reshape(self.predict()[0], (1,))
         self.zero_weights()
-        self.max_cases = tf.reshape(self.predict()[0], ())
+        self.max_cases = tf.reshape(self.predict()[0], (1,))
         
         self.max_stringency = tf.reshape(tf.tensordot(inputs[-1], self.max_npis[0], axes=(1,1)), ())
-        
         self.max_reduction = self.max_cases - self.min_cases
         
+        # stringency penalty starts high - 1 increase in stringency is impossible since it's the max number of reducible cases
+        # scale stringency/penalty relationship with max weighted stringency
+            
+    # could potentially constrain with case goal?
+    #@tf.function
+    
     def reset_optimizer(self):
-        self.optimizer.set_weights(self.optimizer_zero_weights)
-    
-    def change_lr(self, lr):
+        if len(self.optimizer.weights) != 0:
+            self.optimizer.set_weights(self.optimizer_zero_weights)
+            
+    def change_lr(self, lr, beta_1 = 0.9, beta_2 = 0.999, decay=0.0):
         self.optimizer.lr.assign(lr)
+        self.optimizer.beta_1.assign(beta_1)
+        self.optimizer.beta_2.assign(beta_2)
+        self.optimizer.decay.assign(decay)
     
-    @tf.function
+    @tf.function#(experimental_compile=True)
     def train_loop(self, stringency_penalty):
         print("tracing...")
         with tf.GradientTape() as tape:
             new_cases, stringency = self.predict()
+            
             
             cases_loss = self.loss_fn(self.min_cases, new_cases)
             
@@ -92,7 +99,7 @@ class Trainer(object):
             total_loss = tf.math.add(cases_loss, stringency_loss)
             
             gradients = tape.gradient(total_loss, self.prescriptor.trainable_weights)
-     
+            
             self.optimizer.apply_gradients(zip(gradients, self.prescriptor.trainable_weights))
-        return cases_loss, total_loss, stringency, gradients
+        return cases_loss, stringency, total_loss, gradients
     
