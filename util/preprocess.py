@@ -1,4 +1,10 @@
+# Modified the provided preprocessing code
+
+# @author Andrew Zhou
+
+# Original license
 # Copyright 2020 (c) Cognizant Digital Business, Evolutionary AI. All rights reserved. Issued under the Apache 2.0 License.
+
 
 import os
 
@@ -6,7 +12,7 @@ import os
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from .standard_predictor.xprize_predictor import XPrizePredictor
+from .xprize_predictor import XPrizePredictor
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_PATH = os.path.join(ROOT_DIR, 'data')
@@ -53,7 +59,6 @@ def get_all_data(start_date, data_file_path, ips_path, weights_file_path, window
     df = prepare_dataframe(data_file_path)
     df = df[df.Date < start_date]
     
-    
     fill_starting = df.Date.max() + np.timedelta64(1, 'D')
     
     ips_df = _load_original_data(ips_path)
@@ -63,10 +68,17 @@ def get_all_data(start_date, data_file_path, ips_path, weights_file_path, window
     
     df=df[df.GeoID.isin(required_geos)]
     
+    
+    # If the start date is in the future, use our historical IP file
+    # as a base and project until the start date. Note that as specified
+    # by the competition base IP file (OxCGRT_latest.csv) is frozen on
+    # one of the 2021 January 11 releases. The exact version is in the 
+    # competition repo.
+    
+    # Note that XPrizePredictor uses some redundant code which is replicated
+    # in this file. May fix this issue in the future.
     xprize_predictor = XPrizePredictor(MODEL_WEIGHTS_FILE, df)
     
-    # should fill in data prior to last_known_date as well for countries with no data on 2021-01-11
-    # should do this at this point
     
     fill_ending = pd.to_datetime(start_date) - np.timedelta64(1, 'D')
     
@@ -79,24 +91,26 @@ def get_all_data(start_date, data_file_path, ips_path, weights_file_path, window
     df = pd.concat([df, fill_df])
     
     df = df.sort_values(by=['Date'])
-    weights_df = prepare_weights_df(weights_file_path)
+    npi_weights = prepare_weights_dict(weights_file_path, required_geos)
     
-    initial_conditions = create_country_samples(df, weights_df, required_geos, start_date, window_size)
+    initial_conditions, country_names, geos_and_infected = create_country_samples(df, required_geos, start_date, window_size)
     
-    data["df"] = df
-    data["geos"] = required_geos
+    data["geos"] = df.GeoID.unique()
     data["input_tensors"] = initial_conditions
+    data["npi_weights"] = npi_weights
+    data["country_names"] = country_names
     
     return data
-
-
 
 def add_geoid(df):
     df["GeoID"] = np.where(df["RegionName"].isnull(),
                                   df["CountryName"],
                                   df["CountryName"] + ' / ' + df["RegionName"])
 
-def prepare_weights_df(weights_file_path):
+def prepare_weights_dict(weights_file_path, required_geos):
+    
+    npi_weights = {}
+    
     weights_df = pd.read_csv(weights_file_path,
                             dtype={"RegionName": str,
                                    "RegionCode": str},
@@ -104,7 +118,20 @@ def prepare_weights_df(weights_file_path):
     weights_df["GeoID"] = np.where(weights_df["RegionName"].isnull(),
                                   weights_df["CountryName"],
                                   weights_df["CountryName"] + ' / ' + weights_df["RegionName"])
-    return weights_df
+    
+    for g in required_geos:
+        geo_weights = weights_df[weights_df.GeoID == g]
+
+        if len(geo_weights) != 0:
+            weights = geo_weights.iloc[0][NPI_COLUMNS].to_numpy()
+            weights[weights==0] += 0.001 # so we don't divide by zero later  
+        else:
+            weights = np.array([1.0 for i in range(NB_ACTION)])
+            
+        weight_tensor = tf.convert_to_tensor(weights, dtype='float32')[tf.newaxis]
+        npi_weights[g] = weight_tensor
+            
+    return npi_weights
 
 def get_input_tensor(init_cond):
     context_0 = tf.convert_to_tensor(init_cond['context_0'], dtype='float32')[tf.newaxis, :, tf.newaxis]
@@ -112,9 +139,8 @@ def get_input_tensor(init_cond):
     population = tf.convert_to_tensor(init_cond['population'], dtype='float32')[tf.newaxis]
     total_cases_0 = tf.convert_to_tensor(init_cond['total_cases_0'], dtype='float32')[tf.newaxis]
     prev_new_cases_0 = tf.convert_to_tensor(init_cond['prev_new_cases'], dtype='float32')[tf.newaxis]
-    npi_weights = tf.convert_to_tensor(init_cond['weights'], dtype='float32')[tf.newaxis]
-    return [context_0, action_0, population, total_cases_0, prev_new_cases_0, npi_weights]
-
+    
+    return [context_0, action_0, population, total_cases_0, prev_new_cases_0]
 
 def prepare_dataframe(data_url) -> pd.DataFrame:
     """
@@ -159,6 +185,7 @@ def prepare_dataframe(data_url) -> pd.DataFrame:
     # Compute percent change in new cases and deaths each day
     df['CaseRatio'] = df.groupby('GeoID').SmoothNewCases.pct_change(
     ).fillna(0).replace(np.inf, 0) + 1
+    
     df['DeathRatio'] = df.groupby('GeoID').SmoothNewDeaths.pct_change(
     ).fillna(0).replace(np.inf, 0) + 1
 
@@ -171,6 +198,8 @@ def prepare_dataframe(data_url) -> pd.DataFrame:
     
     return df
 
+# Calculate ConfirmedCases and ProportionInfected columns for the dates we
+# need to fill in before the start date
 def do_calculations(fill_df, hist_df):
     additional_context = _load_additional_context_df()
     new_fill_df = fill_df.merge(additional_context, on=['GeoID'], how='left', suffixes=('', '_y'))
@@ -193,11 +222,9 @@ def do_calculations(fill_df, hist_df):
     
     # Add column for proportion of population infected
     new_fill_df['ProportionInfected'] = new_fill_df['ConfirmedCases'] / new_fill_df['Population']
-
-    # Create column of value to predict
     
     return new_fill_df
-        #future_data = fill_df[fill_df.GeoID == g]    
+
     
 def _load_original_data(data_url):
     latest_df = pd.read_csv(data_url,
@@ -257,38 +284,27 @@ def _load_additional_context_df():
 
     return additional_context_df
 
-def create_country_samples(df, weights_df, geos, start_date, window_size) -> dict:
-    """
-    For each country, creates numpy arrays for Keras
-    :param df: a Pandas DataFrame with historical data for countries (the "Oxford" dataset)
-    :param geos: a list of geo names
-    :param start_date: the first day to prescribe for
-    :return: a dictionary of train and test sets, for each specified country
-    """
+# Modified original logic. Now returns the input tensor for each GeoID,
+# a GeoID to country/region name dict just for convenience, and a dict
+# with the infection count for each GeoID.
+def create_country_samples(df, geos, start_date, window_size) -> dict:
     context_column = 'PredictionRatio'
     action_columns = NPI_COLUMNS
     outcome_column = 'PredictionRatio'
     country_samples = {}
+    country_names = {}
     
+    geos_and_infected = {}
     df = df[df.Date < start_date]
     for g in geos:
         cdf = df[df.GeoID == g]
         cdf = cdf[cdf.ConfirmedCases.notnull()]
-    
-        if len(cdf) == 0:
-            print(g)
-            continue
-        
-        geo_weights = weights_df[weights_df.GeoID == g]
-        
-        if len(geo_weights) != 0:
-            weights = geo_weights.iloc[0][NPI_COLUMNS].to_numpy()
-        else:
-            weights = np.array([1.0 for i in range(NB_ACTION)])
+            
         context_data = np.array(cdf[context_column])
         action_data = np.array(cdf[action_columns])
       
         population = cdf['Population'].iloc[-1]
+    
         context_samples = []
         action_samples = []
         
@@ -302,21 +318,21 @@ def create_country_samples(df, weights_df, geos, start_date, window_size) -> dic
         if len(context_samples) > 0:
             X_context = np.expand_dims(np.stack(context_samples, axis=0), axis=2)
             X_action = np.stack(action_samples, axis=0)
-            #country_samples[g] = {
+            
             initial_conditions = {
                 'context_0': X_context[-1].reshape((-1,)),
                 'action_0': X_action[-1],
                 'population': population,
                 'total_cases_0': initial_total_cases,
-                'prev_new_cases': prev_new_cases,
-                'weights': weights
+                'prev_new_cases': prev_new_cases
             }
             input_tensor = get_input_tensor(initial_conditions)
+            geos_and_infected[g] = initial_total_cases
             country_samples[g] = input_tensor
-    return country_samples
+            country_names[g] = [cdf['CountryName'].iloc[0], cdf['RegionName'].iloc[0]]
+    return country_samples, country_names, geos_and_infected
 
 # Function for performing roll outs into the future
-
     def _roll_out_predictions(predictor, initial_context_input, initial_action_input, future_action_sequence):
         nb_roll_out_days = future_action_sequence.shape[0]
         pred_output = np.zeros(nb_roll_out_days)
