@@ -1,20 +1,7 @@
 # Copyright 2020 (c) Cognizant Digital Business, Evolutionary AI. All rights reserved. Issued under the Apache 2.0 License.
 
 """
-This is the prescribe.py script for a simple example prescriptor that
-generates IP schedules that trade off between IP cost and cases.
-
-The prescriptor is "blind" in that it does not consider any historical
-data when making its prescriptions.
-
-The prescriptor is "greedy" in that it starts with all IPs turned off,
-and then iteratively turns on the unused IP that has the least cost.
-
-Since each subsequent prescription is stricter, the resulting set
-of prescriptions should produce a Pareto front that highlights the
-trade-off space between total IP cost and cases.
-
-Note this file has significant overlap with ../random/prescribe.py.
+Prescribe.py script for team metis2020's prescriptor.
 """
 
 import os
