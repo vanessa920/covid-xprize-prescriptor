@@ -1,5 +1,7 @@
-# modified covid xprize's standard predictor for prescriptor usage
-# Andrew Zhou
+# Modified the provided standard predictor for prescriptor usage by
+# making its weights untrainable
+
+# @author Andrew Zhou
 
 import numpy as np
 import tensorflow as tf
@@ -22,7 +24,6 @@ class Positive(Constraint):
 
     def __call__(self, w):
         return K.abs(w)
-
 
 # Functions to be used for lambda layers in model
 def _combine_r_and_d(x):
